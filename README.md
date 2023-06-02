@@ -117,6 +117,20 @@
   - 重载透明代理：
 
     `/data/adb/box/scripts/box.tproxy renew`
+
+## 自动更新
+
+- 支持自动更新 `config.json`/`config.yaml`/`geosite`/`geoip` 等配置文件（WIP：支持自动更新core）
+
+- 服务启动时下载并更新文件；定时更新；无新版本或下载失败不更新。
+
+- 通过 `/data/adb/box/scripts/box.config` 中的以下数值控制：
+
+  - `auto_update` （`true`/`false`） 控制打开/关系
+  
+  - `config_url`/`geosite_url`/`geoip_url` 为对应的文件下载地址。项目值为空时（`""`），不自动下载和更新对应项目。
+  
+  - `update_interval`，定时更新。整数值，每隔x小时自动更新一次。为0时，仅在服务启动时更新，不做定时更新。
   
 ## 其他说明
 
