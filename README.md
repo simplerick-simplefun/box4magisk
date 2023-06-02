@@ -118,7 +118,7 @@
 
     `/data/adb/box/scripts/box.tproxy renew`
 
-## 自动更新
+##### 自动更新
 
 - 支持自动更新 `config.json`/`config.yaml`/`geosite`/`geoip` 等配置文件（WIP：支持自动更新core）
 
