@@ -33,3 +33,13 @@ mkdir -p ${run_path}
 if [ $events = "w" ] ; then
   rules_add
 fi
+
+# TODO: (priority: low)
+# changes tun device to "ipv4 ony"/"ipv4+ipv6" depends on the new network connected
+# by option1 or option 2
+# option 1: setting config.json and restart core bin.
+# option 2: mannually edit ip -6 rule and ip -6 route.
+
+# TODO: (priority: low)
+# if connected to a known wifi ssid, turn off proxy
+# lookup ctr.inotify ctr.utils for ideas

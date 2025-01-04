@@ -150,21 +150,43 @@ wait_bin_listen() {
   fi
 }
 
+check_stored_pid_running() {
+  local verified='true'
+  
+  bin_pid="$(busybox pidof ${bin_name})"
+  [[ "$?" != "0" ]] && verified='false'
+  stored_pid="$(cat ${pid_file})"
+  [[ "$?" != "0" ]] && verified='false'
+  
+  if [[ "${bin_pid}" != "${stored_pid}" ]]; then
+    [[ " ${bin_pid} " =~ " ${stored_pid} " ]] && bin_pid="${stored_pid}"
+  fi
+  [[ "${bin_pid}" != "${stored_pid}" ]] && verified='false'
+  
+  if ! ${verified} ; then
+    log Warn "check_stored_pid_running: Cannot find running ${bin_name} service with pid recorded in ${pid_file}."
+    return 1
+  fi
+  
+  return 0
+}
+
 display_bin_status() {
-  if bin_pid=$(busybox pidof ${bin_name}) ; then
+  check_stored_pid_running
+  if [ $? -eq 0 ] ; then
     log Info "${bin_name} has started with the $(stat -c %U:%G /proc/${bin_pid}) user group."
     log Info "${bin_name} service is running. ( PID: ${bin_pid} )"
     log Info "${bin_name} memory usage: $(cat /proc/${bin_pid}/status | grep -w VmRSS | awk '{print $2$3}')"
     log Info "${bin_name} cpu usage: $((/system/bin/ps -eo %CPU,NAME | grep ${bin_name} | awk '{print $1"%"}') 2> /dev/null || dumpsys cpuinfo | grep ${bin_name} | awk '{print $1}')"
     log Info "${bin_name} running time: $(busybox ps -o comm,etime | grep ${bin_name} | awk '{print $2}')"
-    echo -n ${bin_pid} > ${pid_file}
     return 0
   else
-    log Warn "${bin_name} service is stopped."
     return 1
   fi
 }
 
+# TODO: (priority: high)
+# function for multiple secondary cores
 start_service() {
   if check_permission ; then
     log Info "${bin_name} will be started with the ${box_user_group} user group."
@@ -172,7 +194,8 @@ start_service() {
       log Info "${bin_name} service is running. ( PID: $(cat ${pid_file}) )"
       return 0
     else
-      if bin_pid=$(pidof ${bin_name}) ; then
+      check_stored_pid_running
+      if [ $? -eq 0 ] ; then
         log Warn "${bin_name} service is running but may not listening. ( PID: ${bin_pid} )"
         return 0
       else
@@ -190,11 +213,80 @@ start_service() {
 stop_service() {
   if display_bin_status ; then
     log Warn "stopping ${bin_name} service."
-    kill $(cat ${pid_file}) || killall ${bin_name}
+    kill $(cat ${pid_file})
     sleep 1
     display_bin_status
+  else
+    # when cannot find $(cat ${pid_file}) as a running ${bin_name} process, attempt to killall running ${bin_name} process
+    killall ${bin_name}
   fi
   rm -f ${pid_file} >> /dev/null 2>&1
+}
+
+check_pid_status() {
+  check_stored_pid_running
+  if [ $? -ne 0 ] ; then
+    return 1
+  fi
+  
+  # ${bin_pid} has value assigned in check_stored_pid_running
+  if [ -f "/proc/${bin_pid}/status" ]; then
+    local pid_name=$(cat /proc/${bin_pid}/status | grep '^Name:' | awk '{print $2}')
+    local pid_state=$(cat /proc/${bin_pid}/status | grep '^State:' | awk '{print $2}')
+    
+    if [[ "${pid_name}" != "${bin_name}" ]]; then
+      log Error "check_pid_status: Process name of pid ${bin_pid} does not match bin name ${bin_name}"
+      return 1
+    else
+      [[ "${1}" == "paused" ]] && [[ "${pid_state}" != "T" ]] && return 1
+      [[ "${1}" == "running" ]] && [[ "${pid_state}" != "R" && "${pid_state}" != "S" && "${pid_state}" != "D" ]] && return 1
+      [[ "${1}" == "" ]] && log Info "${bin_name} service process state is: ${pid_state}"
+    fi
+  else
+    log Error "check_pid_status: Cannot find /proc/${bin_pid}/status file"
+    return 1
+  fi
+}
+
+# DONE: (priority: high)
+# add pause and resume function
+# TODO: (priority: high)
+# make sure mtalk[1-8]?[.]google[.]com is accessible: 1. check 2. possibly edit host to a proxy ip (CF workers)
+pause_service() {
+  check_pid_status 'running'
+  if [ ! $? -eq 0 ]; then
+    log Error "pause_service: ${bin_name} serving not running, pausing failed."
+    return 1
+  fi
+  
+  # considering ip rules >0 <10000 to be manually added by tun proxy
+  ip rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $0}' > ${iprule_file}
+  ip rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $1}' | while read priority; do
+    ip rule del prio $priority
+  done
+  
+  # ${bin_pid} has value assigned in check_pid_status
+  kill -SIGSTOP ${bin_pid}
+}
+
+resume_service() {
+  check_pid_status 'paused'
+  if [ ! $? -eq 0 ]; then
+    log Error "resume_service: ${bin_name} serving not paused, resuming failed."
+    return 1
+  fi
+  
+  # ${bin_pid} has value assigned in check_pid_status
+  kill -SIGCONT ${bin_pid}
+  
+  while read line; do
+    priority=$(echo "$line" | awk -F: '{print $1}')
+    rule=$(echo "$line" | awk -F: '{print $2}' | sed 's/^ *//')
+
+    ip rule add prio "$priority" $rule
+  done < ${iprule_file}
+  
+  echo '' > ${iprule_file}
 }
 
 # create_tun_link() {
@@ -219,6 +311,7 @@ probe_tun_index() {
   return 1
 }
 
+# no use for sing-box
 tun_forward_ip_rules() {
   ip rule $1 iif lo goto 6000 pref 5000
   ip rule $1 iif ${tun_device} lookup main suppress_prefixlength 0 pref 5010
@@ -229,6 +322,7 @@ tun_forward_ip_rules() {
   ip rule $1 nop pref 6000
 }
 
+# no use for sing-box
 tun_forward_ip_rules_del() {
   ip rule del pref 5000
   ip rule del pref 5010
@@ -244,6 +338,8 @@ sing_tun_ip_rules() {
   ip rule $1 lookup main pref 7000
 }
 
+# TODO: (priority: low)
+# use tot.sh for better tether_counter handling
 tun_forward_iptables_rules() {
   # iptables $1 FORWARD -s 10.0.0.0/8 -o ${tun_device} -j ACCEPT
   # iptables $1 FORWARD -s 172.16.0.0/12 -o ${tun_device} -j ACCEPT
@@ -263,14 +359,27 @@ tun_forward_enable() {
   tun_forward_disable
   sleep 1
   echo 1 > /proc/sys/net/ipv4/ip_forward
+  
+  [ "$(cat /proc/sys/net/ipv4/conf/default/rp_filter)" == "1" ] && \
   echo 2 > /proc/sys/net/ipv4/conf/default/rp_filter
+  
+  [ "$(cat /proc/sys/net/ipv4/conf/all/rp_filter)" == "1" ] && \
   echo 2 > /proc/sys/net/ipv4/conf/all/rp_filter
+  
   ## echo 0 > /dev/ip_forward_stub
   ## chown $(stat -c '%u:%g' /data/misc/net/rt_tables) /dev/ip_forward_stub
   ## chcon $(stat -Z -c '%C' /data/misc/net/rt_tables) /dev/ip_forward_stub
   ## mount -o bind /dev/ip_forward_stub /proc/sys/net/ipv4/ip_forward
 
   # create_tun_link
+  
+  # probe_tun_index will not find route table index for sing-box's tun,
+  # therefore, tun_forward_ip_rules will not get executed when core is sing-box
+  # tun_forward_ip_rules is probably for clash only
+  
+  # as sing-box's tun have no such table in /data/misc/net/rt_tables
+  # it's kernel link route is in table main; and its routes are in table 2022;
+  # it does not have a traditional table containing kernel link and rest of the routes in /data/misc/net/rt_tables
   probe_tun_index && tun_forward_ip_rules "add"
   probe_tun_device && tun_forward_iptables_rules "-I" && sing_tun_ip_rules "add" && log Info "tun hotspot support is enabled."
   return 0
@@ -283,6 +392,17 @@ tun_forward_disable() {
   tun_forward_iptables_rules "-D" >> /dev/null 2>&1
   log Warn "tun hotspot support is disabled."
 }
+
+
+# TODO: (priority: high)
+# switch android system dns setting when enable/disable/pause/continue
+# set system dns to PrivateDns:Off when proxy tun active; need to save original dns setting before switching
+# revert to original dns setting when proxy tun non-active
+
+# TODO: (priority: high)
+# mark all udp/53 (iptables) and route those to tun in "ip rule"
+# iptables -t mangle -A OUTPUT -p udp --dport 53 -j MARK --set-mark <MARK_VALUE>
+# ip rule add fwmark <MARK_VALUE> table <TABLE_ID>
 
 case "$1" in
   start)
@@ -297,6 +417,12 @@ case "$1" in
     stop_service
     sleep 2
     start_service
+    ;;
+  pause)
+    pause_service
+    ;;
+  resume)
+    resume_service
     ;;
   status)
     display_bin_status
