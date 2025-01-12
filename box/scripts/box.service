@@ -395,8 +395,8 @@ convert_to_ranges()
 }
 
 sorteduid_array_subtraction() {
-  declare -n arr1=$1
-  declare -n arr2=$2
+  arr1=($1)
+  arr2=($2)
   
   local result_arr=()
 
@@ -428,10 +428,10 @@ sorteduid_array_subtraction() {
 }
 
 sorteduid_array_addition() {
-  declare -n arr1=$1
-  declare -n arr2=$2
+  arr1=($1)
+  arr2=($2)
   
-  local result_arr=()
+  result_arr=()
   
   local arr1_size=${#arr1[@]}
   local arr2_size=${#arr2[@]}
@@ -503,16 +503,16 @@ add_tun_rules() {
   fi
   
   # set the variables; check/validate options
-  local my_rule_index=$(( ${tun_rule_index} - 1000 ))
+  local my_rule_index=$(( tun_rule_index - 1000 ))
   ###TODO: make a skip_tun_rule by this script
-  local skip_tun_rule_index=$(( ${tun_rule_index} + 10 ))
+  local skip_tun_rule_index=$(( tun_rule_index + 10 ))
   
   # !ipv4 only! enable tun forward for hotspot (in ipv4)
-  ip rule add prio ${tun_rule_index} lookup main
-  ip rule add prio $(( ${my_rule_index} + 1 )) from all iif ${tun_device} lookup main suppress_prefixlength 0
+  ip rule add prio ${my_rule_index} not fwmark ${mark_id} lookup main
+  ip rule add prio $(( my_rule_index + 1 )) from all iif ${tun_device} lookup main suppress_prefixlength 0
   
   # !ipv6 only! disable tun if ipv6 not available
-  if ! $(network_has_ipv6) ; then
+  if ! "$(network_has_ipv6)" ; then
     ip -6 rule add priority ${tun_rule_index} from all unreachable
   fi
   
@@ -520,7 +520,7 @@ add_tun_rules() {
   ## mark all udp/53 (iptables) and route those to tun in "ip rule"
   iptables_cmd -t mangle -N DNS_TO_TUN
   iptables_cmd -t mangle -A OUTPUT -p udp --dport 53 -j DNS_TO_TUN
-  ip_cmd rule add prio $(( ${my_rule_index} + 10 )) fwmark ${mark_id} lookup ${tun_table_index}
+  ip_cmd rule add prio $(( my_rule_index + 10 )) fwmark ${mark_id} lookup ${tun_table_index}
   
   ## save the original system dns setting, change the new setting to private_dns_mode:off
   local orig_dns_mode=$(settings get global private_dns_mode)
@@ -530,35 +530,45 @@ add_tun_rules() {
   
   # add blacklist/whitelist apps for tun in ip rule
   ## prepare uid arrays
-  local boxuserlist_apps_uids=()
-  local sys_proxy_apps_uids=()
-  local sys_noneproxy_apps_uids=()
+  boxuserlist_apps_uids=()
+  sys_proxy_apps_uids=()
+  sys_noneproxy_apps_uids=()
+
   # exclude system apps from tun in ip rule; not excluding google apps and default download app
   # should exclude for Chinese OEMs' ROMs, should not exclude for international OEMs' ROMs
   
   if [[ "${proxy_mode}" == "blacklist" || "${proxy_mode}" == "whitelist" ]]; then
     ## prepare ${boxuserlist_apps_uids}
-    while read app_nameuid; do
-      local currentPkgName="echo ${app_nameuid} | cut -d ' ' -f1"
-      for pkgName in "${ruled_packages_list[@]}"; do
-        if [[ "${pkgName}" == "${currentPkgName}" ]]; then
-          boxuserlist_apps_uids+=("$(echo ${app_nameuid} | cut -d ' ' -f2)")
-        fi
-      done
-    done <<< "$(pm list packages -U | awk -F'[: ]' '{print $2, $4}' | sort -k2 -n)"
+    local selector=''
+    for pkgName in "${ruled_packages_list[@]}"; do
+      selector="${selector}|${pkgName}"
+    done
+    selector="${selector:1}"
+    
+    while read user_rule_app_uid; do
+      boxuserlist_apps_uids+=("${user_rule_app_uid}")
+    done <<< "$(pm list packages -U | awk -F'[: ]' '{print $2, $4}' | grep -E ${selector} | sort -k2 -n | cut -d ' ' -f2)"
+    
+    #### more than one apps shares same uid as "com.android.providers.downloads"
+    #### therefore, for default download app, add its pkgUID to selector
+    local all_sys_apps="$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}')"
+    selector="$(echo "${all_sys_apps}" | grep 'com.android.providers.downloads' | cut -d ' ' -f2)"
+    selector="${selector}|com\.android\.shell|com\.google\.android\.|com\.android\.vending"
     
     ## prepare ${sys_proxy_apps_uids}
     if [[ "${proxy_mode}" == "whitelist" ]]; then
       while read sys_proxy_app; do
-        sys_proxy_apps_uids+=("$(echo ${sys_proxy_app} | cut -d ' ' -f2)")
-      done <<< "$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}' | sort -k2 -n | grep -E 'com[.]google[.]android[.]|com[.]android[.]vending|com[.]android[.]providers[.]downloads')"
+        sys_proxy_apps_uids+=("${sys_proxy_app}")
+      done <<< "$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}' | grep -E ${selector} | sort -k2 -n | cut -d ' ' -f2)"
     fi
+    #### adding root to the proxy whitelist. for magisk/ksu/apatch core-updating/module-downloading.
+    sys_proxy_apps_uids=(0 ${sys_proxy_apps_uids[@]})
     
     ## prepare ${sys_noneproxy_apps_uids}
     if [[ "${proxy_mode}" == "blacklist" && "${blacklist_exclude_systemapps}" == "true" ]]; then
       while read sys_noneproxy_app; do
-        sys_noneproxy_apps_uids+=("$(echo "${sys_noneproxy_app}" | cut -d ' ' -f2)")
-      done <<< "$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}' | sort -k2 -n | grep -v -E 'com[.]google[.]android[.]|com[.]android[.]vending|com[.]android[.]providers[.]downloads')"
+        sys_noneproxy_apps_uids+=($sys_noneproxy_app)
+      done <<< "$(echo "${all_sys_apps}" | grep -v -E ${selector} | sort -k2 -n | cut -d ' ' -f2)"
     fi
   fi
   
@@ -566,35 +576,33 @@ add_tun_rules() {
   ### if ${blacklist_exclude_systemapps} is false, exclude uid's from ${boxuserlist_apps_uids},
   ### if ${blacklist_exclude_systemapps} is true, additionally exclude uid's from all system apps, except always-proxy-system-apps(google apps and others)
   if [[ "${proxy_mode}" == "blacklist" ]]; then
-    local blacklist_apps_uids=()
+    blacklist_apps_uids=()
     if [[ "${blacklist_exclude_systemapps}" == "true" ]]; then
-      blacklist_apps_uids=($(sorteduid_array_addition boxuserlist_apps_uids sys_noneproxy_apps_uids))
+      blacklist_apps_uids=($(sorteduid_array_addition "$(echo ${boxuserlist_apps_uids[@]})" "$(echo ${sys_noneproxy_apps_uids[@]})"))
     else
-      local arr_empty=()
-      blacklist_apps_uids=($(sorteduid_array_addition boxuserlist_apps_uids arr_empty))
+      blacklist_apps_uids=($(sorteduid_array_addition "$(echo ${boxuserlist_apps_uids[@]})" ""))
     fi
     
     for package_uid in "${blacklist_apps_uids[@]}"; do
       # example: ip rule add prio 8020 from all uidrange 2000:2000 goto 9010
-      ip_cmd rule add prio $(( ${my_rule_index} + 20 )) from all uidrange ${package_uid}-${package_uid} goto ${skip_tun_rule_index}
+      ip_cmd rule add prio $(( my_rule_index + 20 )) from all uidrange ${package_uid}-${package_uid} goto ${skip_tun_rule_index}
       iptables_cmd -t mangle -A DNS_TO_TUN -m owner --uid-owner ${package_uid} -j RETURN
     done
     
-    ip_cmd rule add prio $(( ${my_rule_index} + 30 )) add from all lookup ${tun_table_index}
+    ip_cmd rule add prio $(( my_rule_index + 30 )) add from all lookup ${tun_table_index}
     iptables_cmd -t mangle -A DNS_TO_TUN -j MARK --set-mark ${mark_id}
   # for whitelist, select from all the apps(system+user), and include always-proxy-system-apps(google apps and others), and make sure they are not duplicated
   elif [[ "${proxy_mode}" == "whitelist" ]]; then
-    local white_apps_uids=()
-    white_apps_uids=($(sorteduid_array_addition boxuserlist_apps_uids sys_proxy_apps_uids))
+    white_apps_uids=($(sorteduid_array_addition "$(echo ${boxuserlist_apps_uids[@]})" "$(echo ${sys_proxy_apps_uids[@]})"))
     
     for package_uid in "${white_apps_uids[@]}"; do
       # example: ip rule add prio 8020 from all uidrange 2000:2000 lookup 2022
-      ip_cmd rule add prio $(( ${my_rule_index} + 20 )) from all uidrange ${package_uid}-${package_uid} lookup ${tun_table_index}
+      ip_cmd rule add prio $(( my_rule_index + 20 )) from all uidrange ${package_uid}-${package_uid} lookup ${tun_table_index}
       iptables_cmd -t mangle -A DNS_TO_TUN -m owner --uid-owner ${package_uid} -j MARK --set-mark ${mark_id}
     done
     
-    ip_cmd rule add prio $(( ${my_rule_index} + 30 )) from all goto ${skip_tun_rule_index}
-    ip_cmd rule add prio $(( ${my_rule_index} + 30 )) not from all goto ${skip_tun_rule_index}
+    ip_cmd rule add prio $(( my_rule_index + 30 )) from all goto ${skip_tun_rule_index}
+    ip_cmd rule add prio $(( my_rule_index + 30 )) not from all goto ${skip_tun_rule_index}
     iptables_cmd -t mangle -A DNS_TO_TUN -j RETURN
   fi
 }
