@@ -158,10 +158,11 @@ check_stored_pid_running() {
   stored_pid="$(cat ${pid_file})"
   [[ "$?" != "0" ]] && verified='false'
   
-  if [[ "${bin_pid}" != "${stored_pid}" ]]; then
-    [[ " ${bin_pid} " =~ " ${stored_pid} " ]] && bin_pid="${stored_pid}"
+  if [[ " ${bin_pid} " =~ " ${stored_pid} " ]]; then
+    bin_pid="${stored_pid}"
+  else
+    verified='false'
   fi
-  [[ "${bin_pid}" != "${stored_pid}" ]] && verified='false'
   
   if ! ${verified} ; then
     log Warn "check_stored_pid_running: Cannot find running ${bin_name} service with pid recorded in ${pid_file}."
@@ -248,46 +249,6 @@ check_pid_status() {
   fi
 }
 
-# DONE: (priority: high)
-# add pause and resume function
-# TODO: (priority: high)
-# make sure mtalk[1-8]?[.]google[.]com is accessible: 1. check 2. possibly edit host to a proxy ip (CF workers)
-pause_service() {
-  check_pid_status 'running'
-  if [ ! $? -eq 0 ]; then
-    log Error "pause_service: ${bin_name} serving not running, pausing failed."
-    return 1
-  fi
-  
-  # considering ip rules >0 <10000 to be manually added by tun proxy
-  ip rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $0}' > ${iprule_file}
-  ip rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $1}' | while read priority; do
-    ip rule del prio $priority
-  done
-  
-  # ${bin_pid} has value assigned in check_pid_status
-  kill -SIGSTOP ${bin_pid}
-}
-
-resume_service() {
-  check_pid_status 'paused'
-  if [ ! $? -eq 0 ]; then
-    log Error "resume_service: ${bin_name} serving not paused, resuming failed."
-    return 1
-  fi
-  
-  # ${bin_pid} has value assigned in check_pid_status
-  kill -SIGCONT ${bin_pid}
-  
-  while read line; do
-    priority=$(echo "$line" | awk -F: '{print $1}')
-    rule=$(echo "$line" | awk -F: '{print $2}' | sed 's/^ *//')
-
-    ip rule add prio "$priority" $rule
-  done < ${iprule_file}
-  
-  echo '' > ${iprule_file}
-}
 
 # create_tun_link() {
 #   mkdir -p /dev/net
@@ -334,8 +295,327 @@ tun_forward_ip_rules_del() {
 }
 
 sing_tun_ip_rules() {
-  ip rule $1 from all iif ${tun_device} lookup main suppress_prefixlength 0 pref 8000
-  ip rule $1 lookup main pref 7000
+  ip rule $1 prio 8000 from all iif ${tun_device} lookup main suppress_prefixlength 0
+  ip rule $1 prio 7000 lookup main
+}
+
+# TODO: (priority: high)
+network_has_ipv6() {
+  if [ -z "${has_ipv6}" ]; then
+    if [[ "${ipv6}" == "enable" ]] ; then
+      has_ipv6='true'
+    else
+      has_ipv6='false'
+    fi
+  fi
+  
+  echo "${has_ipv6}"
+}
+
+ip_cmd()
+{
+  ip "$@"
+  ip -6 "$@"
+}
+
+iptables_cmd()
+{
+  iptables -w 100 "$@"
+  ip6tables -w 100 "$@"
+}
+
+# DONE: (priority: high)
+# add pause and resume function
+# TODO: (priority: high)
+# make sure mtalk[1-8]?[.]google[.]com is accessible: 1. check 2. possibly edit host to a proxy ip (CF workers)
+pause_service() {
+  check_pid_status 'running'
+  if [ ! $? -eq 0 ]; then
+    log Error "pause_service: ${bin_name} service not running, pausing failed."
+    return 1
+  fi
+  
+  # DNS modifications
+  ## revert to the saved original system dns setting
+  settings put global private_dns_mode ${system_dns_mode}
+  ## remove mark all udp/53 (iptables) to route those to tun in "ip rule"
+  iptables_cmd -t mangle -D OUTPUT -p udp --dport 53 -j DNS_TO_TUN >> /dev/null 2>&1
+  
+  ###TODO: make a skip_tun_rule by this script
+  local skip_tun_rule_index=$(( ${tun_rule_index} + 10 ))
+  ip_cmd rule add prio 111 from all goto ${skip_tun_rule_index}
+  ip_cmd rule add prio 111 not from all goto ${skip_tun_rule_index}
+  
+  # ${bin_pid} has value assigned in check_pid_status
+  kill -SIGSTOP ${bin_pid}
+}
+
+resume_service() {
+  check_pid_status 'paused'
+  if [ ! $? -eq 0 ]; then
+    log Error "resume_service: ${bin_name} service not paused, resuming failed."
+    return 1
+  fi
+  
+  # ${bin_pid} has value assigned in check_pid_status
+  kill -SIGCONT ${bin_pid}
+  
+  ###TODO: make a skip_tun_rule by this script
+  local skip_tun_rule_index=$(( ${tun_rule_index} + 10 ))
+  ip_cmd rule del prio 111 from all goto ${skip_tun_rule_index}
+  ip_cmd rule del prio 111 not from all goto ${skip_tun_rule_index}
+  
+  # DNS modifications
+  ## restore mark all udp/53 (iptables) to route those to tun in "ip rule"
+  iptables_cmd -t mangle -A OUTPUT -p udp --dport 53 -j DNS_TO_TUN >> /dev/null 2>&1
+  ## resume to private_dns_mode:off
+  settings put global private_dns_mode off
+}
+
+convert_to_ranges()
+{
+  result=''
+  
+  start=0
+  end=0
+  
+  while read -r num; do
+    if (( ${end} == ${num} - 1 )); then
+      end=$(( ${end} + 1 ))
+    elif (( ${num} > ${end} )); then
+      result="${result}${start}-${end}\n"
+      start=${num}
+      end=${num}
+    fi
+  done <<< "$1"
+  
+  result="${result}${start}-${end}"
+  
+  echo -e "${result}"
+}
+
+sorteduid_array_subtraction() {
+  local arr1=("$1")
+  local arr2=("$2")
+  
+  local result_arr=()
+
+  local arr2_index=0
+  local arr2_size=${#arr2[@]}
+        
+  for arr1_item in "${arr1[@]}"; do
+    if [ ${arr2_index} -eq ${arr2_size} ]; then
+      result_arr+=("${arr1_item}")
+    else
+      while [[ ${arr1_item} -gt ${arr2[${arr2_index}]} && ${arr2_index} -lt ${arr2_size} ]]; do
+        arr2_index=(( ${arr2_index} + 1 ))
+      done
+      
+      if [[ ${arr2_index} -eq ${arr2_size} ]]; then
+        result_arr+=("${arr1_item}")
+        continue
+      fi
+            
+      if [[ ${arr1_item} -lt ${arr2[$arr2_index]} ]]; then
+        result_arr+=("${arr1_item}")
+      elif [[ ${arr1_item} -eq ${arr2[$arr2_index]} ]]; then
+        arr2_index=(( ${arr2_index} + 1 ))
+      fi
+    fi
+  done
+  
+  echo "${result_arr[@]}"
+}
+
+sorteduid_array_addition() {
+  local arr1=("$1")
+  local arr2=("$2")
+  
+  local result_arr=()
+  
+  local arr1_size=${#arr1[@]}
+  local arr2_size=${#arr2[@]}
+  local arr1_idx=0
+  local arr2_idx=0
+  
+  local cur_item=''
+  local last_item=''
+  
+  while [[ ${arr1_idx} -lt ${arr1_size} || ${arr2_idx} -lt ${arr2_size} ]]; do
+    if [[ ${arr1_idx} -eq ${arr1_size} ]]; then
+      cur_item=${arr2[$arr2_idx]}
+      arr2_index=(( ${arr2_index} + 1 ))
+    elif [[ ${arr2_idx} -eq ${arr2_size} ]]; then
+      cur_item=${arr1[$arr1_idx]}
+      arr1_index=(( ${arr1_index} + 1 ))
+    else
+      if [[ ${arr1[$arr1_idx]} -lt ${arr2[$arr2_idx]} ]]; then
+        cur_item=${arr1[$arr1_idx]}
+        arr1_index=(( ${arr1_index} + 1 ))
+      elif [[ ${arr1[$arr1_idx]} -eq ${arr2[$arr2_idx]} ]]; then
+        cur_item=${arr1[$arr1_idx]}
+        arr1_index=(( ${arr1_index} + 1 ))
+        arr2_index=(( ${arr2_index} + 1 ))
+      else
+        cur_item=${arr2[$arr2_idx]}
+        arr2_index=(( ${arr2_index} + 1 ))
+      fi
+    fi
+    
+    if [[ "${cur_item}" != "${last_item}" ]]; then
+      result_arr+=("${cur_item}")
+      last_item=${cur_item}
+    fi
+  done
+  
+  echo "${result_arr[@]}"
+}
+
+# DONE: (priority: high)
+# mark all udp/53 (iptables) and route those to tun in "ip rule"
+
+# DONE: (priority: high)
+# exclude tun route for system apps
+# blacklist/whitelist for user defined apps
+# pm list packages -U | grep -E '[a|b|c]' | awk -F'[: ]' '{print $4}'
+# this command gives the biggest/last system app uid:
+# pm list packages -s -U | sort -t':' -k3 -n | tail -n 1 | awk -F'[: ]' '{print $4}'
+# this command gives the google related system apps uids:
+# pm list packages -s -U | grep 'com.google.android.' | awk -F'[: ]' '{print $4}'
+
+# DONE: (priority: high)
+# switch android system dns setting when enable/disable/pause/continue
+# set system dns to PrivateDns:Off when proxy tun active; need to save original dns setting before switching
+# revert to original dns setting when proxy tun non-active
+# "settings get global private_dns_mode":  off/opportunistic/hostname
+# "settings put global private_dns_mode off"
+
+# TODO: (priority: low)
+# add block list apps so their internet is blocked
+
+# TODO: (priority: high)
+# TEST CODE
+add_tun_rules() {
+  check_pid_status 'running'
+  if [ ! $? -eq 0 ]; then
+    log Error "add_tun_rules: ${bin_name} service not running, function failed."
+    return 1
+  fi
+  
+  # set the variables; check/validate options
+  local my_rule_index=$(( ${tun_rule_index} - 1000 ))
+  ###TODO: make a skip_tun_rule by this script
+  local skip_tun_rule_index=$(( ${tun_rule_index} + 10 ))
+  
+  # !ipv4 only! enable tun forward for hotspot (in ipv4)
+  ip rule add prio ${tun_rule_index} lookup main
+  ip rule add prio $(( ${my_rule_index} + 1 )) from all iif ${tun_device} lookup main suppress_prefixlength 0
+  
+  # !ipv6 only! disable tun if ipv6 not available
+  if ! $(network_has_ipv6) ; then
+    ip -6 rule add priority ${tun_rule_index} from all unreachable
+  fi
+  
+  # DNS modifications
+  ## mark all udp/53 (iptables) and route those to tun in "ip rule"
+  iptables_cmd -t mangle -N DNS_TO_TUN
+  iptables_cmd -t mangle -A OUTPUT -p udp --dport 53 -j DNS_TO_TUN
+  ip_cmd rule add prio $(( ${my_rule_index} + 10 )) fwmark ${mark_id} lookup ${tun_table_index}
+  
+  ## save the original system dns setting, change the new setting to private_dns_mode:off
+  local orig_dns_mode=$(settings get global private_dns_mode)
+  sed -i "s/^system_dns_mode=.*/system_dns_mode=\"${orig_dns_mode}\"/" ${scripts_dir}/box.config
+  settings put global private_dns_mode off
+  
+  
+  # add blacklist/whitelist apps for tun in ip rule
+  ## prepare uid arrays
+  local boxuserlist_apps_uids=()
+  local sys_proxy_apps_uids=()
+  local sys_noneproxy_apps_uids=()
+  # exclude system apps from tun in ip rule; not excluding google apps and default download app
+  # should exclude for Chinese OEMs' ROMs, should not exclude for international OEMs' ROMs
+  
+  if [[ "${proxy_mode}" == "blacklist" || "${proxy_mode}" == "whitelist" ]]; then
+    ## prepare ${boxuserlist_apps_uids}
+    while read app_nameuid; do
+      local currentPkgName="echo ${app_nameuid} | cut -d ' ' -f1"
+      for pkgName in "${ruled_packages_list[@]}"; do
+        if [[ "${pkgName}" == "${currentPkgName}" ]]; then
+          boxuserlist_apps_uids+=("$(echo ${app_nameuid} | cut -d ' ' -f2)")
+        fi
+      done
+    done <<< "$(pm list packages -U | awk -F'[: ]' '{print $2, $4}' | sort -k2 -n)"
+    
+    ## prepare ${sys_proxy_apps_uids}
+    if [[ "${proxy_mode}" == "whitelist" ]]; then
+      while read sys_proxy_app; do
+        sys_proxy_apps_uids+=("$(echo ${sys_proxy_app} | cut -d ' ' -f2)")
+      done <<< "$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}' | sort -k2 -n | grep -E 'com[.]google[.]android[.]|com[.]android[.]vending|com[.]android[.]providers[.]downloads')"
+    fi
+    
+    ## prepare ${sys_noneproxy_apps_uids}
+    if [[ "${proxy_mode}" == "blacklist" && "${blacklist_exclude_systemapps}" == "true" ]]; then
+      while read sys_noneproxy_app; do
+        sys_noneproxy_apps_uids+=("$(echo "${sys_noneproxy_app}" | cut -d ' ' -f2)")
+      done <<< "$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}' | sort -k2 -n | grep -v -E 'com[.]google[.]android[.]|com[.]android[.]vending|com[.]android[.]providers[.]downloads')"
+    fi
+  fi
+  
+  # for blacklist,
+  ### if ${blacklist_exclude_systemapps} is false, exclude uid's from ${boxuserlist_apps_uids},
+  ### if ${blacklist_exclude_systemapps} is true, additionally exclude uid's from all system apps, except always-proxy-system-apps(google apps and others)
+  if [[ "${proxy_mode}" == "blacklist" ]]; then
+    local blacklist_apps_uids=()
+    if [[ "${blacklist_exclude_systemapps}" == "true" ]]; then
+      blacklist_apps_uids=($(sorteduid_array_addition "${boxuserlist_apps_uids[@]}" "${sys_noneproxy_apps_uids[@]}"))
+    else
+      blacklist_apps_uids=($(sorteduid_array_addition "${boxuserlist_apps_uids[@]}" ""))
+    fi
+    
+    for package_uid in "${blacklist_apps_uids[@]}"; do
+      # example: ip rule add prio 8020 from all uidrange 2000:2000 goto 9010
+      ip_cmd rule add prio $(( ${my_rule_index} + 20 )) from all uidrange ${package_uid}-${package_uid} goto ${skip_tun_rule_index}
+      iptables_cmd -t mangle -A DNS_TO_TUN -m owner --uid-owner ${package_uid} -j RETURN
+    done
+    
+    ip_cmd rule add prio $(( ${my_rule_index} + 30 )) add from all lookup ${tun_table_index}
+    iptables_cmd -t mangle -A DNS_TO_TUN -j MARK --set-mark ${mark_id}
+  # for whitelist, select from all the apps(system+user), and include always-proxy-system-apps(google apps and others), and make sure they are not duplicated
+  elif [[ "${proxy_mode}" == "whitelist" ]]; then
+    local white_apps_uids=()
+    white_apps_uids=($(sorteduid_array_addition "${boxuserlist_apps_uids[@]}" "${sys_proxy_apps_uids[@]}"))
+    
+    for package_uid in "${white_apps_uids[@]}"; do
+      # example: ip rule add prio 8020 from all uidrange 2000:2000 lookup 2022
+      ip_cmd rule add prio $(( ${my_rule_index} + 20 )) from all uidrange ${package_uid}-${package_uid} lookup ${tun_table_index}
+      iptables_cmd -t mangle -A DNS_TO_TUN -m owner --uid-owner ${package_uid} -j MARK --set-mark ${mark_id}
+    done
+    
+    ip_cmd rule add prio $(( ${my_rule_index} + 30 )) from all goto ${skip_tun_rule_index}
+    ip_cmd rule add prio $(( ${my_rule_index} + 30 )) not from all goto ${skip_tun_rule_index}
+    iptables_cmd -t mangle -A DNS_TO_TUN -j RETURN
+  fi
+}
+
+# DONE: (priority: high)
+del_tun_rules() {
+  # DNS modifications
+  ## remove mark all udp/53 (iptables) to route those to tun in "ip rule"
+  iptables_cmd -t mangle -F DNS_TO_TUN >> /dev/null 2>&1
+  iptables_cmd -t mangle -D OUTPUT -j DNS_TO_TUN >> /dev/null 2>&1
+  iptables_cmd -t mangle -X DNS_TO_TUN >> /dev/null 2>&1
+
+  # considering ip rules >0 <10000 to be manually added by tun proxy
+  ip rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $1}' | while read priority; do
+    ip rule del prio $priority >> /dev/null 2>&1
+  done
+  ip -6 rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $1}' | while read priority; do
+    ip -6 rule del prio $priority >> /dev/null 2>&1
+  done
+  
+  ## revert to the saved original system dns setting
+  settings put global private_dns_mode ${system_dns_mode}
 }
 
 # TODO: (priority: low)
@@ -344,10 +624,8 @@ tun_forward_iptables_rules() {
   # iptables $1 FORWARD -s 10.0.0.0/8 -o ${tun_device} -j ACCEPT
   # iptables $1 FORWARD -s 172.16.0.0/12 -o ${tun_device} -j ACCEPT
   # iptables $1 FORWARD -s 192.168.0.0/16 -o ${tun_device} -j ACCEPT
-  iptables -w 100 $1 FORWARD -o ${tun_device} -j ACCEPT
-  iptables -w 100 $1 FORWARD -i ${tun_device} -j ACCEPT
-  ip6tables -w 100 $1 FORWARD -o ${tun_device} -j ACCEPT
-  ip6tables -w 100 $1 FORWARD -i ${tun_device} -j ACCEPT
+  iptables_cmd $1 FORWARD -o ${tun_device} -j ACCEPT
+  iptables_cmd $1 FORWARD -i ${tun_device} -j ACCEPT
   # iptables $1 PREROUTING -t nat ! -i ${tun_device} -s 10.0.0.0/8 -p udp --dport 53 -j DNAT --to 1.1.1.1
   # iptables $1 PREROUTING -t nat ! -i ${tun_device} -s 172.16.0.0/12 -p udp --dport 53 -j DNAT --to 1.1.1.1
   # iptables $1 PREROUTING -t nat ! -i ${tun_device} -s 192.168.0.0/16 -p udp --dport 53 -j DNAT --to 1.1.1.1
@@ -394,15 +672,6 @@ tun_forward_disable() {
 }
 
 
-# TODO: (priority: high)
-# switch android system dns setting when enable/disable/pause/continue
-# set system dns to PrivateDns:Off when proxy tun active; need to save original dns setting before switching
-# revert to original dns setting when proxy tun non-active
-
-# TODO: (priority: high)
-# mark all udp/53 (iptables) and route those to tun in "ip rule"
-# iptables -t mangle -A OUTPUT -p udp --dport 53 -j MARK --set-mark <MARK_VALUE>
-# ip rule add fwmark <MARK_VALUE> table <TABLE_ID>
 
 case "$1" in
   start)

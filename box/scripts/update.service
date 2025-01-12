@@ -1,0 +1,147 @@
+#!/system/bin/sh
+
+scripts=$(realpath $0)
+scripts_dir=$(dirname ${scripts})
+
+source ${scripts_dir}/box.config
+
+cron_pid_file="${run_path}/cron_update.pid"
+
+files_updated=0
+service_name="box4magisk"
+
+download_url=""
+download_file=""
+tempfile="${run_path}/tempfile"
+
+log() {
+  export TZ=Asia/Shanghai
+  now=$(date +"[%Y-%m-%d %H:%M:%S %Z]")
+  case $1 in
+    Info)
+      [ -t 1 ] && echo -e "\033[1;32m${now} [Info]: $2\033[0m" || echo "${now} [Info]: $2"
+      ;;
+    Warn)
+      [ -t 1 ] && echo -e "\033[1;33m${now} [Warn]: $2\033[0m" || echo "${now} [Warn]: $2"
+      ;;
+    Error)
+      [ -t 1 ] && echo -e "\033[1;31m${now} [Error]: $2\033[0m" || echo "${now} [Error]: $2"
+      ;;
+    *)
+      [ -t 1 ] && echo -e "\033[1;30m${now} [$1]: $2\033[0m" || echo "${now} [$1]: $2"
+      ;;
+  esac
+}
+
+update_file() {
+  busybox wget -T 60 --no-check-certificate -q $download_url -O $tempfile 2>/dev/null || log Warn "Unable to download $download_url" && return 1
+  
+#  if [[ "$download_url" == "$bin_url" ]]; then
+#    unpack_bin
+#  fi
+  
+  if [[ ! -f $download_file ]] || [[ $(cmp $tempfile $download_file) != "" ]]; then
+    chmod 644 $tempfile
+    chown $box_user_group $tempfile
+    mv $tempfile $download_file
+    log Info "${service_name}.auto_update: $download_file updated"
+    files_updated=1
+  else
+    rm -f $tempfile 2>/dev/null
+  fi
+}
+
+unpack_bin() {
+  ## TODO: unpack $tempfile based on $bin_name/$download_url, and re-name the core-bin file extracted to $tempfile
+}
+
+update_all() {
+#  if [[ ! -z "$bin_url" ]] ; then
+#    download_url="$bin_url"
+#    download_file="${box_path}/bin/${bin_name}"
+#    update_file
+#  fi
+  if [[ ! -z "$config_url" ]] ; then
+    download_url="$config_url"
+    [[ "$bin_name" == "clash" ]] && cfg_name="config.yaml" || cfg_name="config.json"
+    download_file="${box_path}/${bin_name}/${cfg_name}"
+    update_file
+  fi
+  if [[ ! -z "$geosite_url" ]] ; then
+    download_url="$geosite_url"
+    geosite_name="geosite.${geosite_url##*.}"
+    download_file="${box_path}/${bin_name}/${geosite_name}"
+    update_file
+  fi
+  if [[ ! -z "$geoip_url" ]] ; then
+    download_url="$geoip_url"
+    geoip_name="geoip.${geoip_url##*.}"
+    download_file="${box_path}/${bin_name}/${geoip_name}"
+    update_file
+  fi
+}
+
+finish() {
+  if [[ $files_updated -ne 0 ]] ; then
+    log Info "${service_name}.auto_update: New files updated"
+    if [ "$restart_service" = true ] ; then
+      log Info "${service_name}.auto_update: Restarting service..."
+      ${scripts_dir}/box.service restart
+    fi
+  else
+    log Info "${service_name}.auto_update: All local files up-to-date, nothing updated."
+  fi
+
+  log Info "${service_name}.auto_update: Update done."
+}
+
+start_service() {
+  if [[ $update_interval -ne 0 ]] ; then
+    mkdir -p ${scripts_dir}/cronjob
+    echo "* */${update_interval} * * * ${scripts_dir}/update.service cron_update" | cat > ${scripts_dir}/cronjob/root
+    nohup busybox crond -f -c ${scripts_dir}/cronjob &
+    echo -n $! > ${cron_pid_file}
+  fi
+  
+  cron_job &
+}
+
+stop_service() {
+  if display_status >> /dev/null ; then
+    kill $(cat $cron_pid_file)
+    rm -f ${cron_pid_file}
+    log Info "${service_name}.auto_update is stopped."
+  fi
+}
+
+cron_job() {
+  log Info "${service_name}.auto_update: Starting update files..."
+  update_all
+  
+  restart_service=true
+  finish
+}
+
+display_status() {
+  ps -p $(cat $cron_pid_file 2>/dev/null) 2>/dev/null && cat ${scripts_dir}/cronjob/root
+}
+
+
+
+case "$1" in
+  start)
+    display_status || start_service
+    ;;
+  stop)
+    stop_service
+    ;;
+  cron_update)
+    cron_job
+    ;;
+  status)
+    display_status
+    ;;
+  *)
+    log Error "$0 $1 usage: $0 {start|stop|cron_job|status}"
+    ;;
+esac
