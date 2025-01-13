@@ -66,6 +66,7 @@ check_permission() {
   fi
 }
 
+# shellcheck disable=SC2120
 start_bin() {
   ulimit -SHn 1000000
   case "${bin_name}" in
@@ -146,7 +147,7 @@ check_stored_pid_running() {
   stored_pid="$(cat ${pid_file})"
   [[ "$?" != "0" ]] && verified='false'
   
-  if [[ " ${bin_pid} " =~ " ${stored_pid} " ]]; then
+  if [[ " ${bin_pid} " == *" ${stored_pid} "* ]]; then
     bin_pid="${stored_pid}"
   else
     verified='false'
@@ -169,8 +170,10 @@ check_pid_status() {
   
   # ${bin_pid} has value assigned in check_stored_pid_running
   if [ -f "/proc/${bin_pid}/status" ]; then
-    local pid_name=$(cat /proc/${bin_pid}/status | grep '^Name:' | awk '{print $2}')
-    local pid_state=$(cat /proc/${bin_pid}/status | grep '^State:' | awk '{print $2}')
+    local pid_name
+    local pid_state
+    pid_name=$(cat /proc/${bin_pid}/status | grep '^Name:' | awk '{print $2}')
+    pid_state=$(cat /proc/${bin_pid}/status | grep '^State:' | awk '{print $2}')
     
     if [[ "${pid_name}" != "${bin_name}" ]]; then
       log Error "check_pid_status: Process name of pid ${bin_pid} does not match bin name ${bin_name}"
@@ -252,12 +255,12 @@ probe_tun_index() {
   while [ ! -f "/data/misc/net/rt_tables" ] ; do
     sleep 3
   done
-  cat /data/misc/net/rt_tables | while read -r index name ; do
+  while read -r index name ; do
     if [ ${name} = ${tun_device} ] ; then
       tun_table_index=${index}
       return 0
     fi
-  done
+  done < /data/misc/net/rt_tables
   return 1
 }
 
@@ -331,7 +334,7 @@ pause_service() {
   iptables_cmd -t mangle -D OUTPUT -p udp --dport 53 -j DNS_TO_TUN >> /dev/null 2>&1
   
   ###TODO: make a skip_tun_rule by this script
-  local skip_tun_rule_index=$(( ${tun_rule_index} + 10 ))
+  local skip_tun_rule_index=$(( tun_rule_index + 10 ))
   ip_cmd rule add prio 111 from all goto ${skip_tun_rule_index}
   ip_cmd rule add prio 111 not from all goto ${skip_tun_rule_index}
   
@@ -350,7 +353,7 @@ resume_service() {
   kill -SIGCONT ${bin_pid}
   
   ###TODO: make a skip_tun_rule by this script
-  local skip_tun_rule_index=$(( ${tun_rule_index} + 10 ))
+  local skip_tun_rule_index=$(( tun_rule_index + 10 ))
   ip_cmd rule del prio 111 from all goto ${skip_tun_rule_index}
   ip_cmd rule del prio 111 not from all goto ${skip_tun_rule_index}
   
@@ -369,9 +372,9 @@ convert_to_ranges()
   end=0
   
   while read -r num; do
-    if (( ${end} == ${num} - 1 )); then
-      end=$(( ${end} + 1 ))
-    elif (( ${num} > ${end} )); then
+    if (( end == num - 1 )); then
+      ((end++))
+    elif (( num > end )); then
       result="${result}${start}-${end}\n"
       start=${num}
       end=${num}
@@ -393,21 +396,21 @@ sorteduid_array_subtraction() {
   local arr2_size=${#arr2[@]}
         
   for arr1_item in "${arr1[@]}"; do
-    if [ ${arr2_index} -eq ${arr2_size} ]; then
+    if (( arr2_index == arr2_size )); then
       result_arr+=("${arr1_item}")
     else
-      while [[ ${arr1_item} -gt ${arr2[${arr2_index}]} && ${arr2_index} -lt ${arr2_size} ]]; do
+      while (( arr1_item > arr2[arr2_index] && arr2_index < arr2_size )); do
         ((arr2_index++))
       done
       
-      if [[ ${arr2_index} -eq ${arr2_size} ]]; then
+      if (( arr2_index == arr2_size )); then
         result_arr+=("${arr1_item}")
         continue
       fi
             
-      if [[ ${arr1_item} -lt ${arr2[$arr2_index]} ]]; then
+      if (( arr1_item < arr2[arr2_index] )); then
         result_arr+=("${arr1_item}")
-      elif [[ ${arr1_item} -eq ${arr2[$arr2_index]} ]]; then
+      elif (( arr1_item == arr2[arr2_index] )); then
         ((arr2_index++))
       fi
     fi
@@ -427,32 +430,32 @@ sorteduid_array_addition() {
   local arr1_idx=0
   local arr2_idx=0
   
-  local cur_item=''
-  local last_item=''
+  local cur_item=0
+  local last_item=0
   
-  while [[ ${arr1_idx} -lt ${arr1_size} || ${arr2_idx} -lt ${arr2_size} ]]; do
-    if [[ ${arr1_idx} -eq ${arr1_size} ]]; then
-      cur_item=${arr2[$arr2_idx]}
+  while (( arr1_idx < arr1_size || arr2_idx < arr2_size )); do
+    if (( arr1_idx == arr1_size )); then
+      cur_item=${arr2[${arr2_idx}]}
       ((arr2_idx++))
-    elif [[ ${arr2_idx} -eq ${arr2_size} ]]; then
-      cur_item=${arr1[$arr1_idx]}
+    elif (( arr2_idx == arr2_size )); then
+      cur_item=${arr1[${arr1_idx}]}
       ((arr1_idx++))
     else
-      if [[ ${arr1[$arr1_idx]} -lt ${arr2[$arr2_idx]} ]]; then
-        cur_item=${arr1[$arr1_idx]}
+      if (( arr1[arr1_idx] < arr2[arr2_idx] )); then
+        cur_item=${arr1[${arr1_idx}]}
       ((arr1_idx++))
-      elif [[ ${arr1[$arr1_idx]} -eq ${arr2[$arr2_idx]} ]]; then
-        cur_item=${arr1[$arr1_idx]}
+      elif (( arr1[arr1_idx] == arr2[arr2_idx] )); then
+        cur_item=${arr1[${arr1_idx}]}
       ((arr1_idx++))
       ((arr2_idx++))
       else
-        cur_item=${arr2[$arr2_idx]}
+        cur_item=${arr2[${arr2_idx}]}
       ((arr2_idx++))
       fi
     fi
     
-    if [[ "${cur_item}" != "${last_item}" ]]; then
-      result_arr+=("${cur_item}")
+    if (( cur_item != last_item )); then
+      result_arr+=(${cur_item})
       last_item=${cur_item}
     fi
   done
@@ -465,19 +468,14 @@ sorteduid_array_addition() {
 
 # DONE: (priority: high)
 # exclude tun route for system apps
+
+# DONE: (priority: high)
 # blacklist/whitelist for user defined apps
-# pm list packages -U | grep -E '[a|b|c]' | awk -F'[: ]' '{print $4}'
-# this command gives the biggest/last system app uid:
-# pm list packages -s -U | sort -t':' -k3 -n | tail -n 1 | awk -F'[: ]' '{print $4}'
-# this command gives the google related system apps uids:
-# pm list packages -s -U | grep 'com.google.android.' | awk -F'[: ]' '{print $4}'
 
 # DONE: (priority: high)
 # switch android system dns setting when enable/disable/pause/continue
-# set system dns to PrivateDns:Off when proxy tun active; need to save original dns setting before switching
-# revert to original dns setting when proxy tun non-active
+# set system dns to PrivateDns:Off when proxy tun active; revert to original dns setting when proxy tun non-active
 # "settings get global private_dns_mode":  off/opportunistic/hostname
-# "settings put global private_dns_mode off"
 
 # TODO: (priority: low)
 # add block list apps so their internet is blocked
@@ -485,8 +483,7 @@ sorteduid_array_addition() {
 # TODO: (priority: high)
 # TEST CODE
 add_tun_rules() {
-  check_pid_status 'running'
-  if [ ! $? -eq 0 ]; then
+  if ! check_pid_status 'running'; then
     log Error "add_tun_rules: ${bin_name} service not running, function failed."
     return 1
   fi
@@ -512,7 +509,8 @@ add_tun_rules() {
   ip_cmd rule add prio $(( my_rule_index + 10 )) fwmark ${mark_id} lookup ${tun_table_index}
   
   ## save the original system dns setting, change the new setting to private_dns_mode:off
-  local orig_dns_mode=$(settings get global private_dns_mode)
+  local orig_dns_mode
+  orig_dns_mode=$(settings get global private_dns_mode)
   sed -i "s/^system_dns_mode=.*/system_dns_mode=\"${orig_dns_mode}\"/" ${scripts_dir}/box.config
   settings put global private_dns_mode off
   
@@ -536,28 +534,29 @@ add_tun_rules() {
     
     while read user_rule_app_uid; do
       boxuserlist_apps_uids+=("${user_rule_app_uid}")
-    done <<< "$(pm list packages -U | awk -F'[: ]' '{print $2, $4}' | grep -E ${selector} | sort -k2 -n | cut -d ' ' -f2)"
+    done <<< "$(pm list packages -U | awk -F'[: ]' '{print $2, $4}' | grep -E "${selector}" | sort -k2 -n | cut -d ' ' -f2)"
     
     #### more than one apps shares same uid as "com.android.providers.downloads"
     #### therefore, for default download app, add its pkgUID to selector
-    local all_sys_apps="$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}')"
+    local all_sys_apps
+    all_sys_apps="$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}')"
     selector="$(echo "${all_sys_apps}" | grep 'com.android.providers.downloads' | cut -d ' ' -f2)"
     selector="${selector}|com\.android\.shell|com\.google\.android\.|com\.android\.vending"
     
     ## prepare ${sys_proxy_apps_uids}
     if [[ "${proxy_mode}" == "whitelist" ]]; then
-      while read sys_proxy_app; do
+      while read -r sys_proxy_app; do
         sys_proxy_apps_uids+=("${sys_proxy_app}")
-      done <<< "$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}' | grep -E ${selector} | sort -k2 -n | cut -d ' ' -f2)"
+      done <<< "$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}' | grep -E "${selector}" | sort -k2 -n | cut -d ' ' -f2)"
     fi
     #### adding root to the proxy whitelist. for magisk/ksu/apatch core-updating/module-downloading.
     sys_proxy_apps_uids=(0 ${sys_proxy_apps_uids[@]})
     
     ## prepare ${sys_noneproxy_apps_uids}
     if [[ "${proxy_mode}" == "blacklist" && "${blacklist_exclude_systemapps}" == "true" ]]; then
-      while read sys_noneproxy_app; do
+      while read -r sys_noneproxy_app; do
         sys_noneproxy_apps_uids+=($sys_noneproxy_app)
-      done <<< "$(echo "${all_sys_apps}" | grep -v -E ${selector} | sort -k2 -n | cut -d ' ' -f2)"
+      done <<< "$(echo "${all_sys_apps}" | grep -v -E "${selector}" | sort -k2 -n | cut -d ' ' -f2)"
     fi
   fi
   
@@ -567,9 +566,9 @@ add_tun_rules() {
   if [[ "${proxy_mode}" == "blacklist" ]]; then
     blacklist_apps_uids=()
     if [[ "${blacklist_exclude_systemapps}" == "true" ]]; then
-      blacklist_apps_uids=($(sorteduid_array_addition "$(echo ${boxuserlist_apps_uids[@]})" "$(echo ${sys_noneproxy_apps_uids[@]})"))
+      blacklist_apps_uids=($(sorteduid_array_addition "$(echo "${boxuserlist_apps_uids[@]}")" "$(echo "${sys_noneproxy_apps_uids[@]}")"))
     else
-      blacklist_apps_uids=($(sorteduid_array_addition "$(echo ${boxuserlist_apps_uids[@]})" ""))
+      blacklist_apps_uids=($(sorteduid_array_addition "$(echo "${boxuserlist_apps_uids[@]}")" ""))
     fi
     
     for package_uid in "${blacklist_apps_uids[@]}"; do
@@ -582,7 +581,7 @@ add_tun_rules() {
     iptables_cmd -t mangle -A DNS_TO_TUN -j MARK --set-mark ${mark_id}
   # for whitelist, select from all the apps(system+user), and include always-proxy-system-apps(google apps and others), and make sure they are not duplicated
   elif [[ "${proxy_mode}" == "whitelist" ]]; then
-    white_apps_uids=($(sorteduid_array_addition "$(echo ${boxuserlist_apps_uids[@]})" "$(echo ${sys_proxy_apps_uids[@]})"))
+    white_apps_uids=($(sorteduid_array_addition "$(echo "${boxuserlist_apps_uids[@]}")" "$(echo "${sys_proxy_apps_uids[@]}")"))
     
     for package_uid in "${white_apps_uids[@]}"; do
       # example: ip rule add prio 8020 from all uidrange 2000:2000 lookup 2022
@@ -598,19 +597,21 @@ add_tun_rules() {
 
 # DONE: (priority: high)
 del_tun_rules() {
-  # DNS modifications
-  ## remove mark all udp/53 (iptables) to route those to tun in "ip rule"
-  iptables_cmd -t mangle -F DNS_TO_TUN >> /dev/null 2>&1
-  iptables_cmd -t mangle -D OUTPUT -j DNS_TO_TUN >> /dev/null 2>&1
-  iptables_cmd -t mangle -X DNS_TO_TUN >> /dev/null 2>&1
+  {
+    # DNS modifications
+    ## remove mark all udp/53 (iptables) to route those to tun in "ip rule"
+    iptables_cmd -t mangle -F DNS_TO_TUN
+    iptables_cmd -t mangle -D OUTPUT -j DNS_TO_TUN
+    iptables_cmd -t mangle -X DNS_TO_TUN
 
-  # considering ip rules >0 <10000 to be manually added by tun proxy
-  ip rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $1}' | while read priority; do
-    ip rule del prio $priority >> /dev/null 2>&1
-  done
-  ip -6 rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $1}' | while read priority; do
-    ip -6 rule del prio $priority >> /dev/null 2>&1
-  done
+    # considering ip rules >0 <10000 to be manually added by tun proxy
+    ip rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $1}' | while read -r priority; do
+      ip rule del prio $priority
+    done
+    ip -6 rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $1}' | while read -r priority; do
+      ip -6 rule del prio $priority
+    done
+  } >> /dev/null 2>&1
   
   ## revert to the saved original system dns setting
   settings put global private_dns_mode ${system_dns_mode}
@@ -662,10 +663,12 @@ tun_forward_enable() {
 }
 
 tun_forward_disable() {
-  # tun_forward_ip_rules "del" >> /dev/null 2>&1
-  sing_tun_ip_rules "del" >> /dev/null 2>&1
-  tun_forward_ip_rules_del >> /dev/null 2>&1
-  tun_forward_iptables_rules "-D" >> /dev/null 2>&1
+  {
+    # tun_forward_ip_rules "del"
+    sing_tun_ip_rules "del"
+    tun_forward_ip_rules_del
+    tun_forward_iptables_rules "-D"
+  } >> /dev/null 2>&1
   log Warn "tun hotspot support is disabled."
 }
 
@@ -673,8 +676,9 @@ tun_forward_disable() {
 
 case "$1" in
   start)
-    display_bin_status || start_service
-    [ $? = "0" ] && tun_forward_enable
+    if display_bin_status || start_service ; then
+      tun_forward_enable
+    fi
     ;;
   stop)
     stop_service
