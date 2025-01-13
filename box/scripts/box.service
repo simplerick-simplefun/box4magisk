@@ -80,7 +80,7 @@ start_bin() {
         return 1
       fi
       ;;
-    clash|mihomo)
+    mihomo)
       if ${bin_path} -t -d ${box_path}/${bin_name} > ${run_path}/check.log 2>&1 ; then
         log Info "starting ${bin_name} service."
         nohup busybox setuidgid ${box_user_group} ${bin_path} -d ${box_path}/${bin_name} > ${box_path}/${bin_name}/${bin_name}_$(date +%Y%m%d%H%M).log 2> ${run_path}/error_${bin_name}.log &
@@ -96,18 +96,6 @@ start_bin() {
       if ${bin_path} -test -confdir ${box_path}/${bin_name} > ${run_path}/check.log 2>&1 ; then
         log Info "starting ${bin_name} service."
         nohup busybox setuidgid ${box_user_group} ${bin_path} -confdir ${box_path}/${bin_name} > /dev/null 2> ${run_path}/error_${bin_name}.log &
-        echo -n $! > ${pid_file}
-        return 0
-      else
-        log Error "configuration check failed, please check the ${run_path}/check.log file."
-        return 1
-      fi
-      ;;
-    v2ray)
-      export V2RAY_LOCATION_ASSET="${box_path}/${bin_name}"
-      if ${bin_path} test -d ${box_path}/${bin_name} > ${run_path}/check.log 2>&1 ; then
-        log Info "starting ${bin_name} service."
-        nohup busybox setuidgid ${box_user_group} ${bin_path} run -d ${box_path}/${bin_name} > /dev/null 2> ${run_path}/error_${bin_name}.log &
         echo -n $! > ${pid_file}
         return 0
       else
@@ -164,12 +152,38 @@ check_stored_pid_running() {
     verified='false'
   fi
   
-  if ! ${verified} ; then
+  if ! "${verified}" ; then
+    bin_pid=''
     log Warn "check_stored_pid_running: Cannot find running ${bin_name} service with pid recorded in ${pid_file}."
     return 1
   fi
   
   return 0
+}
+
+check_pid_status() {
+  check_stored_pid_running
+  if [ $? -ne 0 ] ; then
+    return 1
+  fi
+  
+  # ${bin_pid} has value assigned in check_stored_pid_running
+  if [ -f "/proc/${bin_pid}/status" ]; then
+    local pid_name=$(cat /proc/${bin_pid}/status | grep '^Name:' | awk '{print $2}')
+    local pid_state=$(cat /proc/${bin_pid}/status | grep '^State:' | awk '{print $2}')
+    
+    if [[ "${pid_name}" != "${bin_name}" ]]; then
+      log Error "check_pid_status: Process name of pid ${bin_pid} does not match bin name ${bin_name}"
+      return 1
+    else
+      [[ "${1}" == "paused" ]] && [[ "${pid_state}" != "T" ]] && return 1
+      [[ "${1}" == "running" ]] && [[ "${pid_state}" != "R" && "${pid_state}" != "S" && "${pid_state}" != "D" ]] && return 1
+      [[ "${1}" == "" ]] && log Info "${bin_name} service process state is: ${pid_state}"
+    fi
+  else
+    log Error "check_pid_status: Cannot find /proc/${bin_pid}/status file"
+    return 1
+  fi
 }
 
 display_bin_status() {
@@ -222,31 +236,6 @@ stop_service() {
     killall ${bin_name}
   fi
   rm -f ${pid_file} >> /dev/null 2>&1
-}
-
-check_pid_status() {
-  check_stored_pid_running
-  if [ $? -ne 0 ] ; then
-    return 1
-  fi
-  
-  # ${bin_pid} has value assigned in check_stored_pid_running
-  if [ -f "/proc/${bin_pid}/status" ]; then
-    local pid_name=$(cat /proc/${bin_pid}/status | grep '^Name:' | awk '{print $2}')
-    local pid_state=$(cat /proc/${bin_pid}/status | grep '^State:' | awk '{print $2}')
-    
-    if [[ "${pid_name}" != "${bin_name}" ]]; then
-      log Error "check_pid_status: Process name of pid ${bin_pid} does not match bin name ${bin_name}"
-      return 1
-    else
-      [[ "${1}" == "paused" ]] && [[ "${pid_state}" != "T" ]] && return 1
-      [[ "${1}" == "running" ]] && [[ "${pid_state}" != "R" && "${pid_state}" != "S" && "${pid_state}" != "D" ]] && return 1
-      [[ "${1}" == "" ]] && log Info "${bin_name} service process state is: ${pid_state}"
-    fi
-  else
-    log Error "check_pid_status: Cannot find /proc/${bin_pid}/status file"
-    return 1
-  fi
 }
 
 
