@@ -205,9 +205,20 @@ display_bin_status() {
 
 # TODO: (priority: high)
 # function for multiple secondary cores
+
+# DONE: (priority: mid)
+# get and set ${sys_rule_index} from system ip rule result
 start_service() {
   if check_permission ; then
     log Info "${bin_name} will be started with the ${box_user_group} user group."
+    
+    # find and record the tun ip rule starting index
+    local rule_idx="$(ip rule show | head -n 1 | awk -F: '{print $1}')"
+    if [[ "${rule_idx}" != "" && "${rule_idx}" != "0" ]]; then
+      sys_rule_index="${rule_idx}"
+      sed -i "s/^sys_rule_index=.*/sys_rule_index=\"${sys_rule_index}\"/" ${scripts_dir}/box.config
+    fi
+    
     if start_bin && wait_bin_listen ; then
       log Info "${bin_name} service is running. ( PID: $(cat ${pid_file}) )"
       return 0
@@ -333,10 +344,9 @@ pause_service() {
   ## remove mark all udp/53 (iptables) to route those to tun in "ip rule"
   iptables_cmd -t mangle -D OUTPUT -p udp --dport 53 -j DNS_TO_TUN >> /dev/null 2>&1
   
-  ###TODO: make a skip_tun_rule by this script
-  local skip_tun_rule_index=$(( tun_rule_index + 10 ))
-  ip_cmd rule add prio 111 from all goto ${skip_tun_rule_index}
-  ip_cmd rule add prio 111 not from all goto ${skip_tun_rule_index}
+  local skip_tun_rule_index=$(( sys_rule_index - 1 ))
+  ip_cmd rule add prio $((my_rule_index - 1)) from all goto ${skip_tun_rule_index}
+  ip_cmd rule add prio $((my_rule_index - 1)) not from all goto ${skip_tun_rule_index}
   
   # ${bin_pid} has value assigned in check_pid_status
   kill -SIGSTOP ${bin_pid}
@@ -352,10 +362,9 @@ resume_service() {
   # ${bin_pid} has value assigned in check_pid_status
   kill -SIGCONT ${bin_pid}
   
-  ###TODO: make a skip_tun_rule by this script
-  local skip_tun_rule_index=$(( tun_rule_index + 10 ))
-  ip_cmd rule del prio 111 from all goto ${skip_tun_rule_index}
-  ip_cmd rule del prio 111 not from all goto ${skip_tun_rule_index}
+  local skip_tun_rule_index=$(( sys_rule_index - 1 ))
+  ip_cmd rule del prio $((my_rule_index - 1)) from all goto ${skip_tun_rule_index}
+  ip_cmd rule del prio $((my_rule_index - 1)) not from all goto ${skip_tun_rule_index}
   
   # DNS modifications
   ## restore mark all udp/53 (iptables) to route those to tun in "ip rule"
@@ -464,13 +473,21 @@ sorteduid_array_addition() {
 }
 
 # DONE: (priority: high)
-# mark all udp/53 (iptables) and route those to tun in "ip rule"
+# mark udp/53 packets of proxyed apps (iptables) and route those to tun in "ip rule"
+# this is for Traffic Splitting by ip route table of the proxy tun
 
 # DONE: (priority: high)
-# exclude tun route for system apps
+# ${blacklist_exclude_systemapps}=[true|false]
+# =true: exclude tun route for system apps in blacklist mode
+
+# DONE: (priority: mid)
+# get and set ${tun_rule_index} from system ip rule result
 
 # DONE: (priority: high)
-# blacklist/whitelist for user defined apps
+# Implement blacklist/whitelist for user-defined apps
+# Custom ${skip_tun_rule_index} by the script, instead of using the skip rule created by the proxy tun, only takes effect in blacklist/whitelist mode
+# Using this script's blacklist/whitelist mode with the same blacklist/whitelist mode of the proxy tun will *ADD* the script's listed apps to the final result
+# Using this script's blacklist/whitelist mode with the reverse whitelist/blacklist mode of the proxy tun will *OVERRIDE* the script's listed apps to the final result
 
 # DONE: (priority: high)
 # switch android system dns setting when enable/disable/pause/continue
@@ -482,6 +499,11 @@ sorteduid_array_addition() {
 
 # TODO: (priority: high)
 # TEST CODE
+
+# !ALERT!: assuming proxy tun is already started, and it has added its own ip rules and ip route table
+# At the current code state, we are using:
+# 1. always using the tun ip table created by the proxy tun
+# 2. when blacklist/whitelist is not set, using the tun ip rule created by the proxy tun
 add_tun_rules() {
   if ! check_pid_status 'running'; then
     log Error "add_tun_rules: ${bin_name} service not running, function failed."
@@ -489,9 +511,18 @@ add_tun_rules() {
   fi
   
   # set the variables; check/validate options
-  local my_rule_index=$(( tun_rule_index - 1000 ))
-  ###TODO: make a skip_tun_rule by this script
-  local skip_tun_rule_index=$(( tun_rule_index + 10 ))
+  local skip_tun_rule_index=$(( sys_rule_index - 1 ))
+
+  # find and record the tun ip rule starting index
+  # *for ${tun_rule_index}, it's ok if no ip rule is added by the proxy tun
+  local rule_idx="$(ip rule show | head -n 1 | awk -F: '{print $1}')"
+  if [[ "${rule_idx}" != "" && "${rule_idx}" != "0" ]]; then
+    tun_rule_index="${rule_idx}"
+    sed -i "s/^tun_rule_index=.*/tun_rule_index=\"${tun_rule_index}\"/" ${scripts_dir}/box.config
+  fi
+
+  my_rule_index=$(( tun_rule_index - 1000 ))
+  sed -i "s/^my_rule_index=.*/my_rule_index=\"${my_rule_index}\"/" ${scripts_dir}/box.config
   
   # !ipv4 only! enable tun forward for hotspot (in ipv4)
   ip rule add prio ${my_rule_index} not fwmark ${mark_id} lookup main
@@ -499,7 +530,7 @@ add_tun_rules() {
   
   # !ipv6 only! disable tun if ipv6 not available
   if ! "$(network_has_ipv6)" ; then
-    ip -6 rule add priority ${tun_rule_index} from all unreachable
+    ip -6 rule add priority $(( my_rule_index - 1 )) from all unreachable
   fi
   
   # DNS modifications
@@ -558,6 +589,9 @@ add_tun_rules() {
         sys_noneproxy_apps_uids+=($sys_noneproxy_app)
       done <<< "$(echo "${all_sys_apps}" | grep -v -E "${selector}" | sort -k2 -n | cut -d ' ' -f2)"
     fi
+
+    #### add skip ip rule
+    ip_cmd rule add prio ${skip_tun_rule_index} from all nop
   fi
   
   # for blacklist,
@@ -605,10 +639,11 @@ del_tun_rules() {
     iptables_cmd -t mangle -X DNS_TO_TUN
 
     # considering ip rules >0 <10000 to be manually added by tun proxy
-    ip rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $1}' | while read -r priority; do
+    rule_filter='$1+0 > 0 && $1+0 < '"${sys_rule_index}"' {print $1}'
+    ip rule show | awk -F: "${rule_filter}" | while read -r priority; do
       ip rule del prio $priority
     done
-    ip -6 rule show | awk -F: '$1+0 > 0 && $1+0 < 10000 {print $1}' | while read -r priority; do
+    ip -6 rule show | awk -F: "${rule_filter}" | while read -r priority; do
       ip -6 rule del prio $priority
     done
   } >> /dev/null 2>&1
@@ -671,6 +706,8 @@ tun_forward_disable() {
   } >> /dev/null 2>&1
   log Warn "tun hotspot support is disabled."
 }
+
+
 
 
 
