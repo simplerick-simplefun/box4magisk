@@ -1,5 +1,9 @@
 #!/system/bin/sh
 
+
+# TODO: (priority: high)
+# TEST CODE
+
 export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH:/data/data/com.termux/files/usr/bin"
 
 scripts=$(realpath $0)
@@ -345,8 +349,8 @@ pause_service() {
   iptables_cmd -t mangle -D OUTPUT -p udp --dport 53 -j DNS_TO_TUN >> /dev/null 2>&1
   
   local skip_tun_rule_index=$(( sys_rule_index - 1 ))
-  ip_cmd rule add prio $((my_rule_index - 1)) from all goto ${skip_tun_rule_index}
-  ip_cmd rule add prio $((my_rule_index - 1)) not from all goto ${skip_tun_rule_index}
+  ip_cmd rule add prio $(( my_rule_index - 1 )) from all goto ${skip_tun_rule_index}
+  ip_cmd rule add prio $(( my_rule_index - 1 )) not from all goto ${skip_tun_rule_index}
   
   # ${bin_pid} has value assigned in check_pid_status
   kill -SIGSTOP ${bin_pid}
@@ -363,8 +367,8 @@ resume_service() {
   kill -SIGCONT ${bin_pid}
   
   local skip_tun_rule_index=$(( sys_rule_index - 1 ))
-  ip_cmd rule del prio $((my_rule_index - 1)) from all goto ${skip_tun_rule_index}
-  ip_cmd rule del prio $((my_rule_index - 1)) not from all goto ${skip_tun_rule_index}
+  ip_cmd rule del prio $(( my_rule_index - 1 )) from all goto ${skip_tun_rule_index}
+  ip_cmd rule del prio $(( my_rule_index - 1 )) not from all goto ${skip_tun_rule_index}
   
   # DNS modifications
   ## restore mark all udp/53 (iptables) to route those to tun in "ip rule"
@@ -497,8 +501,6 @@ sorteduid_array_addition() {
 # TODO: (priority: low)
 # add block list apps so their internet is blocked
 
-# TODO: (priority: high)
-# TEST CODE
 
 # !ALERT!: assuming proxy tun is already started, and it has added its own ip rules and ip route table
 # At the current code state, we are using:

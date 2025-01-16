@@ -1,16 +1,30 @@
 #!/system/bin/sh
 
+
 events=$1
 # monitor_dir=$2
 # monitor_file=$3
 
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH:/data/data/com.termux/files/usr/bin"
+
 scripts=$(realpath $0)
 scripts_dir=$(dirname ${scripts})
+module_dir="/data/adb/modules/box4"
+
+if ! [ "${events}" = w ]; then
+	return
+fi
 
 source ${scripts_dir}/box.config
+source ${scripts_dir}/net.utils
+
 
 export TZ=Asia/Shanghai
 
+# TODO: (priority: high)
+# check what does iptables chain "LOCAL_IP_V4" do, see if it's for tproxy only
+# check if it is necessary for tun
+# check by android iptables output and/or github code base
 rules_add() {
   iptables -t mangle -F LOCAL_IP_V4
   ip -4 a | awk '/inet/ {print $2}' | grep -vE "^127.0.0.1" | while read -r local_ipv4 ; do
@@ -30,19 +44,35 @@ rules_add() {
 
 mkdir -p ${run_path}
 
-if [ $events = "w" ] ; then
-  rules_add
-fi
+rules_add
+
 
 # TODO: (priority: mid)
 # auto ipv6
 # when switch network, switch ipv6 on/off based on ipv6 connectivity
 # by mannually edit ip -6 rule and ip -6 route.
+# to compare: stored in ${run_path}: ipv6_available
+if [ ! -f "${module_dir}/disable" ]; then
+	## do stuff
+fi
+## else dont do anything
 
 # TODO: (priority: mid)
 # auto gcm/fcm
-# when switch network, switch proxy on/off for google gcm/fcm service based on connectivity
+# when switching network, switch proxy on/off for google gcm/fcm service based on non-proxy fcm connectivity
+# to compare: stored in ${run_path}: fcm_connectable
+if [ ! -f "${module_dir}/disable" ]; then
+  ## do stuff
+fi
+## else dont do anything
 
 # TODO: (priority: mid)
+# auto switch proxy on/off based on wifi ssid
 # if connected to a known wifi ssid, turn off proxy
-# lookup ctr.inotify ctr.utils for ideas
+# still effective when [ -f "${module_dir}/disable" ], since we use this function to turn proxy on/off
+# to compare: checks if service/module is running or stopped
+if [ ! -f "${module_dir}/disable" ]; then
+  ## do stuff
+else
+  ## do stuff
+fi

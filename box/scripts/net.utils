@@ -1,0 +1,158 @@
+#!/system/bin/sh
+
+# TODO: (priority: low)
+# error handling
+# TODO: (priority: high)
+# TEST CODE
+
+# DONE: (priority: high)
+# provides following functions calls:
+##  get_wifi_ssid: for "auto switch proxy on/off based on wifi ssid" function
+##  get_fcm_connectivity: for "auto gcm/fcm" function
+##  get_ipv6_availability: for "auto ipv6" function
+##  get_network_status: for logging and testing purposes
+
+# global variables
+network_type='' ## mobile_data/wifi/no_network
+if_device=''
+SSID='' ## for network_type='wifi'
+ipv6_available='' ## true/false
+fcm_connectable='' ## true/false
+
+get_wifi_ssid() {
+  if [[ -n "${SSID}" ]]; then
+    echo "${SSID}"
+    return 0
+  fi
+  
+  if [[ "$(get_network_type)" == 'wifi' ]]; then
+	# SSID=$(iw dev wlan0 link | grep SSID | cut -d ' ' -f2)
+    SSID=$(dumpsys wifi | grep mWifiInfo | head -n 1 | cut -d "\"" -f 2)
+    if [ -n "$(printf "%s" "${SSID}" | grep "<unknown ssid>")" ]; then
+      printf "<unknown ssid>"
+      return 1
+    fi
+    printf "%s" "${SSID}"
+  else
+    echo ""
+  fi
+}
+
+# test fcm connectivity using system default if device (skipping tun devices if proxy is on)
+get_fcm_connectivity() {
+  if [[ -n "${fcm_connectable}" ]]; then
+    echo "${fcm_connectable}"
+    return 0
+  fi
+  
+  if [[ -n "$(curl -v --interface $(get_sys_ipv4_addr) 'https://mtalk.google.com:5228' 2>&1 | grep 'SSL connection using TLS')" ]]; then
+    fcm_connectable='true'
+    return 0
+  fi
+
+  local ipv6_addr
+  while read -r ipv6_addr; do
+    if [[ -n "$(curl -v --interface "${ipv6_addr}" 'https://mtalk.google.com:5228' 2>&1 | grep 'SSL connection using TLS')" ]]; then
+      fcm_connectable='true'
+      return 0
+    fi
+  done <<< "$(get_sys_ipv6_addr)"
+  
+  fcm_connectable='false'
+}
+
+get_ipv6_availability() {
+  if [[ -n "${ipv6_available}" ]]; then
+    echo "${ipv6_available}"
+    return 0
+  fi
+
+  if [[ -n "$(get_sys_ipv6_addr)" ]]; then
+    ipv6_available='true'
+  else
+    ipv6_available='false'
+  fi
+  echo "${ipv6_available}"
+}
+
+get_network_status() {
+  {
+    get_sys_if_device
+    get_network_type
+    get_wifi_ssid
+    get_fcm_connectivity
+    get_ipv6_availability
+  } > /dev/null
+
+  echo "network_type=${network_type} if_device=${if_device} SSID=${SSID} ipv6_available=${ipv6_available} fcm_connectable=${fcm_connectable}"
+}
+
+##TODO (priority: bottom): check if "cat /proc/net/route" gives the same result
+get_sys_if_device() {
+  if [[ -n "${if_device}" ]]; then
+    echo "${if_device}"
+    return 0
+  fi
+
+  # ip route show | sed -n 's/.*dev \([^ ]*\).*/\1/p'
+  devices="$(ip route | awk '{print $3}' | grep -v 'tun')"
+
+  if [[ -z "$(echo "${devices}" | grep wlan0)" ]]; then
+    if_device="$(echo "${devices}" | grep wlan0)"
+  elif [[ -n "$(echo "${devices}" | grep rmnet)" ]]; then
+    if_device="$(echo "${devices}" | grep rmnet)"
+  else
+    if_device=''
+    return 1
+  fi
+  echo "${if_device}"
+}
+
+get_network_type() {
+  if [[ -n "${network_type}" ]]; then
+    echo "${network_type}"
+    return 0
+  fi
+  
+  get_sys_if_device > /dev/null
+  
+  case "${if_device}" in
+    rmnet*)
+      network_type='mobile_data'
+      ;;
+    wlan0)
+      network_type='wifi'
+      ;;
+    *)
+      network_type='no_network'
+      ;;
+  esac
+  
+  echo "${network_type}"
+}
+
+get_sys_ipv4_addr() {
+  get_sys_if_device > /dev/null
+  
+  local ipv4_addr
+  ipv4_addr=$(ip addr show "${if_device}" | grep -v inet6 | grep inet | awk '{print $2}' | cut -d '/' -f1)
+  if [[ -z "${ipv4_addr}" ]]; then
+    return 1  # signal error if no IPv4 address found
+  fi
+
+  echo "${ipv4_addr}"
+}
+
+get_sys_ipv6_addr() {
+  get_sys_if_device > /dev/null
+  
+  local ipv6_addr
+  ipv6_addr=$(ip addr show "${if_device}" | grep inet6 | awk '{print $2}' | cut -d '/' -f1 | grep -vE '^fc|^fd|^fe|^ff')
+  if [[ -z "${ipv6_addr}" ]]; then
+    return 1  # signal error if no IPv6 address found
+  fi
+
+  echo "${ipv6_addr}"
+  ## grep -vE '^fc|^fd|^fe|^ff':
+  ## Excludes any address that starts with fc, fd, fe, or ff, which are the ULA prefixes (ipv6 unique local addresses).
+}
