@@ -1,0 +1,55 @@
+#!/system/bin/sh
+
+# Check if the script has already been loaded
+if [ -n "${__RULE_UTILS+x}" ]; then
+    return 0  # Exit if the file has already been sourced
+fi
+# Mark the script as loaded
+__RULE_UTILS=true
+
+scripts=$(realpath $0)
+scripts_dir=$(dirname ${scripts})
+
+source ${scripts_dir}/box.config
+source ${scripts_dir}/net.utils
+
+# TODO: (priority: low)
+# error handling
+# TODO: (priority: high)
+# TEST CODE
+
+ip_cmd()
+{
+  ip "$@"
+  ip -6 "$@"
+}
+
+iptables_cmd()
+{
+  iptables -w 100 "$@"
+  ip6tables -w 100 "$@"
+}
+
+# with box.service:
+# "ip_cmd rule add prio $(( my_rule_index + 10 )) fwmark ${mark_id} lookup ${tun_table_index}"
+auto_fcm() {
+  local gms_uid
+  gms_uid="$(pm list packages -s -U | awk -F'[: ]' '{print $2, $4}' | grep "com.google.android.gms" | cut -d ' ' -f2)"
+
+  if [[ "$(get_fcm_connectivity)" == "true" ]]; then
+    iptables_cmd -t mangle -A MARK_TO_TUN -m owner --uid-owner "${gms_uid}" -p tcp ! --dport 5228 -j MARK --set-mark ${mark_id}
+    ip_cmd rule add from all prio $(( my_rule_index + 11 )) uidrange "${gms_uid}-${gms_uid}" not fwmark ${mark_id} goto ${skip_tun_rule_index}
+  else
+    iptables_cmd -t mangle -D MARK_TO_TUN -m owner --uid-owner "${gms_uid}" -p tcp ! --dport 5228 -j MARK --set-mark ${mark_id} >> /dev/null 2>&1
+    ip_cmd rule del from all prio $(( my_rule_index + 11 )) uidrange "${gms_uid}-${gms_uid}" not fwmark ${mark_id} goto ${skip_tun_rule_index} >> /dev/null 2>&1
+  fi
+}
+
+# assuming ipv6 route is already added by proxy tun
+auto_ipv6() {
+  if [[ "$(get_ipv6_availability)" == "true" ]]; then
+    ip -6 rule del priority $(( my_rule_index + 1 )) from all unreachable >> /dev/null 2>&1
+  else
+    ip -6 rule add priority $(( my_rule_index + 1 )) from all unreachable
+  fi
+}

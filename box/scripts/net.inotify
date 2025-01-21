@@ -16,63 +16,44 @@ if ! [ "${events}" = w ]; then
 fi
 
 source ${scripts_dir}/box.config
-source ${scripts_dir}/net.utils
+source ${scripts_dir}/rules.utils
 
 
 export TZ=Asia/Shanghai
 
-# TODO: (priority: high)
-# check what does iptables chain "LOCAL_IP_V4" do, see if it's for tproxy only
-# check if it is necessary for tun
-# check by android iptables output and/or github code base
-rules_add() {
-  iptables -t mangle -F LOCAL_IP_V4
-  ip -4 a | awk '/inet/ {print $2}' | grep -vE "^127.0.0.1" | while read -r local_ipv4 ; do
-    iptables -w 100 -t mangle -A LOCAL_IP_V4 -d $local_ipv4 -j ACCEPT
-    rv1=$?
-    iptables -w 100 -t nat -A LOCAL_IP_V4 -d $local_ipv4 -j ACCEPT
-    rv2=$?
-    ( [ $rv1 = "0" ] || [ $rv2 = "0" ] ) && echo "$(date +"[%Y-%m-%d %H:%M:%S %Z]") [Info]: local ip is $local_ipv4, anti-loopback rule has been inserted" >> ${run_path}/run.log 2>> ${run_path}/run_error.log
-  done
+if [ -f "${module_dir}/disable" ]; then
+  exit
+fi
 
-  ip6tables -t mangle -F LOCAL_IP_V6
-  ip -6 a | awk '/inet6/ {print $2}' | grep -vE "^fe80|^::1" | while read -r local_ipv6 ; do
-    ip6tables -w 100 -t mangle -A LOCAL_IP_V6 -d $local_ipv6 -j ACCEPT
-    [ $? = "0" ] && echo "$(date +"[%Y-%m-%d %H:%M:%S %Z]") [Info]: local ip is $local_ipv6, anti-loopback rule has been inserted" >> ${run_path}/run.log 2>> ${run_path}/run_error.log
-  done
-}
-
-mkdir -p ${run_path}
-
-rules_add
-
-
-# TODO: (priority: mid)
+# DONE: (priority: mid)
 # auto ipv6
 # when switch network, switch ipv6 on/off based on ipv6 connectivity
-# by mannually edit ip -6 rule and ip -6 route.
-# to compare: stored in ${run_path}: ipv6_available
-if [ ! -f "${module_dir}/disable" ]; then
-	## do stuff
+if [[ "${ipv6_mode}" == "auto" ]]; then
+  auto_ipv6
 fi
-## else dont do anything
 
-# TODO: (priority: mid)
+# DONE: (priority: mid)
 # auto gcm/fcm
 # when switching network, switch proxy on/off for google gcm/fcm service based on non-proxy fcm connectivity
-# to compare: stored in ${run_path}: fcm_connectable
-if [ ! -f "${module_dir}/disable" ]; then
-  ## do stuff
+# TODO: (priority: low)
+# if fcm is un-accessible:
+#   use iptables to hijack dns request to mtalk[0-9].google.com, return a proxy ip address
+if [[ "${fcm_proxy}" == "auto" ]]; then
+  auto_fcm
 fi
-## else dont do anything
 
-# TODO: (priority: mid)
+# DONE: (priority: mid)
 # auto switch proxy on/off based on wifi ssid
-# if connected to a known wifi ssid, turn off proxy
-# still effective when [ -f "${module_dir}/disable" ], since we use this function to turn proxy on/off
-# to compare: checks if service/module is running or stopped
-if [ ! -f "${module_dir}/disable" ]; then
-  ## do stuff
-else
-  ## do stuff
+# if connected to a known wifi ssid, turn off/pause proxy
+if [[ "${bypass_wifi}" == "true" ]]; then
+  new_network_type=$(get_network_type)
+  new_wifi_ssid=$(get_wifi_ssid)
+
+  if [[ "$(get_network_type)" == "wifi" && "${new_wifi_ssid}" != "" && " ${wifi_ssid_list[@]} " == *" ${new_wifi_ssid} "* ]]; then
+    ${scripts_dir}/box.service pause
+  else
+    # TODO: (priority: high)
+    # checks if should be paused by other conditions
+    ${scripts_dir}/box.service resume
+  fi
 fi

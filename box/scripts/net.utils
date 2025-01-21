@@ -1,5 +1,12 @@
 #!/system/bin/sh
 
+# Check if the script has already been loaded
+if [ -n "${__NET_UTILS+x}" ]; then
+    return 0  # Exit if the file has already been sourced
+fi
+# Mark the script as loaded
+__NET_UTILS=true
+
 # TODO: (priority: low)
 # error handling
 # TODO: (priority: high)
@@ -7,6 +14,7 @@
 
 # DONE: (priority: high)
 # provides following functions calls:
+##  get_network_type: for "auto switch proxy on/off based on wifi ssid" function
 ##  get_wifi_ssid: for "auto switch proxy on/off based on wifi ssid" function
 ##  get_fcm_connectivity: for "auto gcm/fcm" function
 ##  get_ipv6_availability: for "auto ipv6" function
@@ -75,6 +83,29 @@ get_ipv6_availability() {
   echo "${ipv6_available}"
 }
 
+get_network_type() {
+  if [[ -n "${network_type}" ]]; then
+    echo "${network_type}"
+    return 0
+  fi
+  
+  get_sys_if_device > /dev/null
+  
+  case "${if_device}" in
+    rmnet*)
+      network_type='mobile_data'
+      ;;
+    wlan0)
+      network_type='wifi'
+      ;;
+    *)
+      network_type='no_network'
+      ;;
+  esac
+  
+  echo "${network_type}"
+}
+
 get_network_status() {
   {
     get_sys_if_device
@@ -106,29 +137,6 @@ get_sys_if_device() {
     return 1
   fi
   echo "${if_device}"
-}
-
-get_network_type() {
-  if [[ -n "${network_type}" ]]; then
-    echo "${network_type}"
-    return 0
-  fi
-  
-  get_sys_if_device > /dev/null
-  
-  case "${if_device}" in
-    rmnet*)
-      network_type='mobile_data'
-      ;;
-    wlan0)
-      network_type='wifi'
-      ;;
-    *)
-      network_type='no_network'
-      ;;
-  esac
-  
-  echo "${network_type}"
 }
 
 get_sys_ipv4_addr() {

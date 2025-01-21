@@ -10,6 +10,7 @@ scripts=$(realpath $0)
 scripts_dir=$(dirname ${scripts})
 
 source ${scripts_dir}/box.config
+source ${scripts_dir}/rules.util
 
 mkdir -p ${run_path}
 mkdir -p ${box_path}/${bin_name}
@@ -306,31 +307,6 @@ sing_tun_ip_rules() {
   ip rule $1 prio 7000 lookup main
 }
 
-# TODO: (priority: high)
-network_has_ipv6() {
-  if [ -z "${has_ipv6}" ]; then
-    if [[ "${ipv6}" == "enable" ]] ; then
-      has_ipv6='true'
-    else
-      has_ipv6='false'
-    fi
-  fi
-  
-  echo "${has_ipv6}"
-}
-
-ip_cmd()
-{
-  ip "$@"
-  ip -6 "$@"
-}
-
-iptables_cmd()
-{
-  iptables -w 100 "$@"
-  ip6tables -w 100 "$@"
-}
-
 # DONE: (priority: high)
 # add pause and resume function
 # TODO: (priority: high)
@@ -346,11 +322,10 @@ pause_service() {
   ## revert to the saved original system dns setting
   settings put global private_dns_mode ${system_dns_mode}
   ## remove mark all udp/53 (iptables) to route those to tun in "ip rule"
-  iptables_cmd -t mangle -D OUTPUT -p udp --dport 53 -j DNS_TO_TUN >> /dev/null 2>&1
+  iptables_cmd -t mangle -D OUTPUT -j MARK_TO_TUN >> /dev/null 2>&1
   
-  local skip_tun_rule_index=$(( sys_rule_index - 1 ))
-  ip_cmd rule add prio $(( my_rule_index - 1 )) from all goto ${skip_tun_rule_index}
-  ip_cmd rule add prio $(( my_rule_index - 1 )) not from all goto ${skip_tun_rule_index}
+  ip_cmd rule add prio ${my_rule_index} from all goto ${skip_tun_rule_index}
+  ip_cmd rule add prio ${my_rule_index} not from all goto ${skip_tun_rule_index}
   
   # ${bin_pid} has value assigned in check_pid_status
   kill -SIGSTOP ${bin_pid}
@@ -366,13 +341,12 @@ resume_service() {
   # ${bin_pid} has value assigned in check_pid_status
   kill -SIGCONT ${bin_pid}
   
-  local skip_tun_rule_index=$(( sys_rule_index - 1 ))
-  ip_cmd rule del prio $(( my_rule_index - 1 )) from all goto ${skip_tun_rule_index}
-  ip_cmd rule del prio $(( my_rule_index - 1 )) not from all goto ${skip_tun_rule_index}
+  ip_cmd rule del prio ${my_rule_index} from all goto ${skip_tun_rule_index}
+  ip_cmd rule del prio ${my_rule_index} not from all goto ${skip_tun_rule_index}
   
   # DNS modifications
   ## restore mark all udp/53 (iptables) to route those to tun in "ip rule"
-  iptables_cmd -t mangle -A OUTPUT -p udp --dport 53 -j DNS_TO_TUN >> /dev/null 2>&1
+  iptables_cmd -t mangle -A OUTPUT -j MARK_TO_TUN >> /dev/null 2>&1
   ## resume to private_dns_mode:off
   settings put global private_dns_mode off
 }
@@ -513,7 +487,8 @@ add_tun_rules() {
   fi
   
   # set the variables; check/validate options
-  local skip_tun_rule_index=$(( sys_rule_index - 1 ))
+  skip_tun_rule_index=$(( sys_rule_index - 1 ))
+  sed -i "s/^skip_tun_rule_index=.*/skip_tun_rule_index=\"${skip_tun_rule_index}\"/" ${scripts_dir}/box.config
 
   # find and record the tun ip rule starting index
   # *for ${tun_rule_index}, it's ok if no ip rule is added by the proxy tun
@@ -527,18 +502,25 @@ add_tun_rules() {
   sed -i "s/^my_rule_index=.*/my_rule_index=\"${my_rule_index}\"/" ${scripts_dir}/box.config
   
   # !ipv4 only! enable tun forward for hotspot (in ipv4)
-  ip rule add prio ${my_rule_index} not fwmark ${mark_id} lookup main
+  ip rule add prio $(( my_rule_index + 1 )) not fwmark ${mark_id} lookup main
   ip rule add prio $(( my_rule_index + 1 )) from all iif ${tun_device} lookup main suppress_prefixlength 0
   
   # !ipv6 only! disable tun if ipv6 not available
-  if ! "$(network_has_ipv6)" ; then
-    ip -6 rule add priority $(( my_rule_index - 1 )) from all unreachable
+  if [[ "${ipv6_mode}" == "auto" ]]; then
+    auto_ipv6
+  elif [[ "${ipv6_mode}" == "off" ]]; then
+    ip -6 rule add prio $(( my_rule_index + 1 )) from all unreachable
   fi
+
+  # iptables marking rules
+  ## specified packets gets marked to tun in "ip rule"
+  iptables_cmd -t mangle -N MARK_TO_TUN
+  iptables_cmd -t mangle -A OUTPUT -j MARK_TO_TUN
   
   # DNS modifications
   ## mark all udp/53 (iptables) and route those to tun in "ip rule"
   iptables_cmd -t mangle -N DNS_TO_TUN
-  iptables_cmd -t mangle -A OUTPUT -p udp --dport 53 -j DNS_TO_TUN
+  iptables_cmd -t mangle -A MARK_TO_TUN -p udp --dport 53 -j DNS_TO_TUN
   ip_cmd rule add prio $(( my_rule_index + 10 )) fwmark ${mark_id} lookup ${tun_table_index}
   
   ## save the original system dns setting, change the new setting to private_dns_mode:off
@@ -595,6 +577,9 @@ add_tun_rules() {
     #### add skip ip rule
     ip_cmd rule add prio ${skip_tun_rule_index} from all nop
   fi
+
+  # auto switch proxy tun for google fcm service
+  auto_fcm
   
   # for blacklist,
   ### if ${blacklist_exclude_systemapps} is false, exclude uid's from ${boxuserlist_apps_uids},
@@ -634,14 +619,16 @@ add_tun_rules() {
 # DONE: (priority: high)
 del_tun_rules() {
   {
-    # DNS modifications
+    # general iptables modifications & DNS modifications
     ## remove mark all udp/53 (iptables) to route those to tun in "ip rule"
     iptables_cmd -t mangle -F DNS_TO_TUN
-    iptables_cmd -t mangle -D OUTPUT -j DNS_TO_TUN
+    iptables_cmd -t mangle -F MARK_TO_TUN
+    iptables_cmd -t mangle -D OUTPUT -j MARK_TO_TUN
     iptables_cmd -t mangle -X DNS_TO_TUN
+    iptables_cmd -t mangle -X MARK_TO_TUN
 
-    # considering ip rules >0 <10000 to be manually added by tun proxy
-    rule_filter='$1+0 > 0 && $1+0 < '"${sys_rule_index}"' {print $1}'
+    # considering ip rules > $(( my_rule_index - 1 )) < $(( my_rule_index + 100 )) to be manually added by tun proxy
+    rule_filter='$1+0 > '"$(( my_rule_index - 1 ))"' && $1+0 < '"$(( my_rule_index + 100 ))"' {print $1}'
     ip rule show | awk -F: "${rule_filter}" | while read -r priority; do
       ip rule del prio $priority
     done
